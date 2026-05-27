@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>instant</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.json">
+<style>
+  :root{ --slate:#2a3140; --accent:#06b6d4; --accent-d:#0891b2; --line:#e2e6eb; --mut:#6b7480; --ok:#16a34a; --bad:#b91c1c; }
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:#1f2733;background:#f4f6f8}
+  .top{display:flex;align-items:center;gap:.6rem;background:var(--slate);color:#fff;padding:.7rem 1rem}
+  .top b{font-weight:800;letter-spacing:.04em}
+  .top a{margin-left:auto;color:#aeb6c2;text-decoration:none;font-size:.85rem}
+  .wrap{max-width:780px;margin:0 auto;padding:1rem}
+  .addbar{display:flex;gap:.5rem;margin-bottom:.6rem;flex-wrap:wrap}
+  .addbar input[type=text]{flex:1;min-width:200px;border:1px solid var(--line);border-radius:8px;padding:.55rem .7rem;font:14px ui-monospace,Menlo,monospace}
+  button{background:var(--accent);color:#fff;border:0;border-radius:8px;padding:.55rem 1rem;font:inherit;font-weight:600;cursor:pointer}
+  button:hover{background:var(--accent-d)}
+  button.ghost{background:#fff;color:#1f2733;border:1px solid var(--line);font-weight:500}
+  .filebtns{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1rem}
+  .hint{font-size:.82rem;color:var(--mut);margin-bottom:1rem}
+  .card{background:#fff;border:1px solid var(--line);border-radius:12px;padding:.9rem 1rem;margin-bottom:1rem}
+  .muted{color:var(--mut)}
+  .tname{font-weight:600;word-break:break-all}
+  .meta{font-size:.82rem;color:var(--mut);margin:.2rem 0}
+  .track{height:.5rem;background:#eef1f4;border-radius:999px;overflow:hidden;margin:.4rem 0}
+  .fill{height:100%;background:var(--accent);border-radius:999px;transition:width .4s}
+  .fill.done{background:var(--ok)}
+  .magnet{font:11px ui-monospace,Menlo,monospace;background:#f1f5f9;border-radius:6px;padding:.4rem .5rem;word-break:break-all;margin:.4rem 0;cursor:pointer}
+  .files video,.files audio,.files img{max-width:100%;display:block;margin:.5rem 0;border-radius:8px;background:#000}
+  .file-dl{display:inline-block;font-size:.85rem;margin:.2rem .6rem .2rem 0;color:var(--accent)}
+  .x{background:none;border:0;color:var(--mut);cursor:pointer;float:right;font-size:1rem}
+  .x:hover{color:var(--bad)}
+  .toast{position:fixed;left:50%;bottom:1.2rem;transform:translateX(-50%);background:var(--slate);color:#fff;padding:.5rem 1rem;border-radius:9px;font-size:.88rem;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div class="top"><b>instant</b><a href="../../../">&uarr; root</a></div>
+<div class="wrap">
+  <form class="addbar" id="addbar">
+    <input type="text" id="magnet" placeholder="Paste a magnet link or infohash…" autocomplete="off">
+    <button type="submit">Add</button>
+  </form>
+  <div class="filebtns">
+    <button class="ghost" id="pick-torrent">+ .torrent file</button>
+    <button class="ghost" id="pick-seed">Seed a file →</button>
+  </div>
+  <div class="hint" id="hint">WebTorrent streams over WebRTC, so it works when <b>web peers</b> are around (browser peers / hybrid seeders). Seed a file to share it instantly.</div>
+  <div id="torrents"></div>
+</div>
+<input id="f-torrent" type="file" accept=".torrent" hidden>
+<input id="f-seed" type="file" multiple hidden>
+<div class="toast" id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/webtorrent@1.9.7/webtorrent.min.js"></script>
+<script>
+// instant - a WebTorrent client in the browser, à la instant.io. Add a magnet /
+// .torrent / infohash to download + stream media inline; seed a file to get a
+// shareable magnet. Pure client (WebRTC + wss trackers) - no pod, no server.
+"use strict";
+var WSS = ['wss://tracker.openwebtorrent.com','wss://tracker.btorrent.xyz','wss://tracker.webtorrent.dev'];
+var torrentsEl = document.getElementById("torrents"), toastEl = document.getElementById("toast");
+var client = null, cards = {};
+
+function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
+function toast(t){ toastEl.textContent=t; toastEl.classList.add("show"); clearTimeout(toast._t); toast._t=setTimeout(function(){toastEl.classList.remove("show");},2400); }
+function fmtBytes(n){ if(!n)return "0 B"; var u=["B","KB","MB","GB"],i=Math.floor(Math.log(n)/Math.log(1024)); return (n/Math.pow(1024,i)).toFixed(i?1:0)+" "+u[i]; }
+
+function getClient(){
+  if(client) return client;
+  if(typeof WebTorrent==="undefined"){ toast("WebTorrent library failed to load"); return null; }
+  client = new WebTorrent();
+  client.on("error", function(e){ toast("WebTorrent: "+(e&&e.message||e)); });
+  return client;
+}
+
+function addTorrent(id){
+  var c=getClient(); if(!c) return;
+  try { c.add(id, { announce: WSS }, onTorrent); }
+  catch(e){ toast("Couldn't add: "+(e.message||e)); }
+}
+function seedFiles(files){
+  var c=getClient(); if(!c||!files.length) return;
+  c.seed(files, { announce: WSS }, function(t){ onTorrent(t, true); toast("Seeding — share the magnet"); });
+}
+
+function onTorrent(t, seeding){
+  if(cards[t.infoHash]) return;
+  var card=document.createElement("div"); card.className="card"; card.id="t-"+t.infoHash;
+  card.innerHTML =
+    '<button class="x" title="Remove">✕</button>'+
+    '<div class="tname">'+esc(t.name||t.infoHash)+'</div>'+
+    '<div class="meta" id="m-'+t.infoHash+'"></div>'+
+    '<div class="track"><div class="fill" id="p-'+t.infoHash+'" style="width:0%"></div></div>'+
+    (seeding?'<div class="magnet" title="click to copy" id="mag-'+t.infoHash+'">'+esc(t.magnetURI)+'</div>':"")+
+    '<div class="files" id="files-'+t.infoHash+'"></div>';
+  torrentsEl.prepend(card);
+  cards[t.infoHash]=t;
+  card.querySelector(".x").onclick=function(){ try{t.destroy();}catch(e){} card.remove(); delete cards[t.infoHash]; };
+  var mag=card.querySelector(".magnet"); if(mag) mag.onclick=function(){ navigator.clipboard&&navigator.clipboard.writeText(t.magnetURI); toast("Magnet copied"); };
+  // render files (video/audio/image inline) + download links
+  var filesEl=document.getElementById("files-"+t.infoHash);
+  t.files.forEach(function(file){
+    if(/\.(mp4|webm|m4v|ogv|mp3|m4a|ogg|wav|jpe?g|png|gif|webp|svg|pdf)$/i.test(file.name)){
+      try{ file.appendTo(filesEl, { autoplay:false, controls:true }); }catch(e){}
+    }
+    var a=document.createElement("a"); a.className="file-dl"; a.textContent="↓ "+file.name; a.href="#";
+    a.onclick=function(e){ e.preventDefault(); file.getBlobURL(function(err,url){ if(err){toast("download failed");return;} var d=document.createElement("a"); d.href=url; d.download=file.name; d.click(); }); };
+    filesEl.appendChild(a);
+  });
+  t.on("noPeers", function(){ var m=document.getElementById("m-"+t.infoHash); if(m && t.numPeers===0 && !seeding) m.dataset.nopeers="1"; });
+  updateCard(t);
+}
+function updateCard(t){
+  var m=document.getElementById("m-"+t.infoHash), p=document.getElementById("p-"+t.infoHash);
+  if(!m||!p) return;
+  var pct=Math.round((t.progress||0)*100);
+  p.style.width=pct+"%"; p.classList.toggle("done", t.done);
+  m.textContent = (t.done?"complete":pct+"%") + " · " + t.numPeers + " peer"+(t.numPeers===1?"":"s") +
+    " · ↓"+fmtBytes(t.downloadSpeed||0)+"/s · ↑"+fmtBytes(t.uploadSpeed||0)+"/s" +
+    (t.numPeers===0 && !t.done ? "  — searching for web peers…" : "");
+}
+setInterval(function(){ for(var h in cards) updateCard(cards[h]); }, 1000);
+
+// --- inputs ---
+document.getElementById("addbar").onsubmit=function(e){ e.preventDefault(); var v=document.getElementById("magnet").value.trim(); if(v){ addTorrent(v); document.getElementById("magnet").value=""; } };
+document.getElementById("pick-torrent").onclick=function(){ document.getElementById("f-torrent").click(); };
+document.getElementById("f-torrent").onchange=function(e){ var f=e.target.files[0]; if(f) addTorrent(f); e.target.value=""; };
+document.getElementById("pick-seed").onclick=function(){ document.getElementById("f-seed").click(); };
+document.getElementById("f-seed").onchange=function(e){ if(e.target.files.length) seedFiles(e.target.files); e.target.value=""; };
+
+if(typeof WebTorrent==="undefined"){ document.getElementById("hint").innerHTML='<b style="color:#b91c1c">WebTorrent failed to load from the CDN.</b> Try reloading.'; }
+</script>
+</body>
+</html>

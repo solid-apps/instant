@@ -1,0 +1,14 @@
+{
+  "name": "instant",
+  "short_name": "instant",
+  "description": "A WebTorrent client in your browser — add a magnet/.torrent to stream, or seed a file to share. WebRTC, no server.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#2a3140",
+  "theme_color": "#2a3140",
+  "handles": [],
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
