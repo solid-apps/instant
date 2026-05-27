@@ -23,8 +23,10 @@ general P2P transfer tool (same tech as webtorrent.io).
 
 ## Notes
 
-- Pure client — nothing is stored on your pod (this is the instant.io-equivalent
-  scope). Saving your magnet library to the pod is a possible follow-up.
+- **Magnet library** — magnets you add or seed are saved (localStorage, and
+  synced to `/private/instant/library.jsonld` on your pod when signed in), shown
+  as "Saved magnets" you can re-load on any device with one click. The torrenting
+  itself stays pure client; only the magnet list touches the pod.
 - Uses default `wss` trackers (openwebtorrent / btorrent / webtorrent.dev).
 
 ## Run

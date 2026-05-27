@@ -49,12 +49,14 @@
     <button class="ghost" id="pick-seed">Seed a file →</button>
   </div>
   <div class="hint" id="hint">WebTorrent streams over WebRTC, so it works when <b>web peers</b> are around (browser peers / hybrid seeders). Seed a file to share it instantly.</div>
+  <div id="library"></div>
   <div id="torrents"></div>
 </div>
 <input id="f-torrent" type="file" accept=".torrent" hidden>
 <input id="f-seed" type="file" multiple hidden>
 <div class="toast" id="toast"></div>
 
+<script src="https://unpkg.com/xlogin"></script>
 <script src="https://cdn.jsdelivr.net/npm/webtorrent@1.9.7/webtorrent.min.js"></script>
 <script>
 // instant - a WebTorrent client in the browser, à la instant.io. Add a magnet /
@@ -68,6 +70,47 @@ var client = null, cards = {};
 function esc(s){ return String(s==null?"":s).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];}); }
 function toast(t){ toastEl.textContent=t; toastEl.classList.add("show"); clearTimeout(toast._t); toast._t=setTimeout(function(){toastEl.classList.remove("show");},2400); }
 function fmtBytes(n){ if(!n)return "0 B"; var u=["B","KB","MB","GB"],i=Math.floor(Math.log(n)/Math.log(1024)); return (n/Math.pow(1024,i)).toFixed(i?1:0)+" "+u[i]; }
+
+// --- pod magnet library (saved on this device; synced to your pod when signed in) ---
+var PIM="http://www.w3.org/ns/pim/space#", LS_LIB="instant.library";
+var LIBRARY=[], DOCURL=null;
+function authFetch(u,o){ return ((window.xlogin && window.xlogin.authFetch) || fetch)(u,o); }
+function me(){ return window.xlogin && window.xlogin.id; }
+function idOf(v){ return typeof v==="string"?v:(v&&v["@id"])||null; }
+function valOf(v){ if(v==null)return null;if(typeof v!=="object")return v;if(Array.isArray(v))return v.length?valOf(v[0]):null;return v["@value"]||v["@id"]||null; }
+function subjects(d){ return Array.isArray(d["@graph"])?d["@graph"]:(Array.isArray(d)?d:[d]); }
+function getLd(u){ return authFetch(u,{headers:{Accept:"application/ld+json"}}).then(function(r){return r.ok?r.json().catch(function(){return null;}):null;}).catch(function(){return null;}); }
+function ensureContainer(u){ return authFetch(u,{method:"HEAD"}).then(function(r){if(r.ok)return;return authFetch(u,{method:"PUT",headers:{"Content-Type":"text/turtle","Link":'<http://www.w3.org/ns/ldp#BasicContainer>; rel="type"'},body:""});}).catch(function(){}); }
+function discoverStorage(webid){ return getLd(webid.replace(/#.*$/,"")).then(function(doc){ if(doc){var s=subjects(doc)[0]||{};var id=valOf(s["pim:storage"]||s[PIM+"storage"]||s["storage"]);if(id){try{return new URL(id,webid).href.replace(/\/?$/,"/");}catch(e){}}} return new URL(webid).origin+"/"; }).catch(function(){try{return new URL(webid).origin+"/";}catch(e){return null;}}); }
+function libLoadLocal(){ try{ LIBRARY=JSON.parse(localStorage.getItem(LS_LIB)||"[]"); }catch(e){ LIBRARY=[]; } }
+function saveLibrary(){
+  try{ localStorage.setItem(LS_LIB, JSON.stringify(LIBRARY)); }catch(e){}
+  if(me()&&DOCURL){
+    var doc={"@context":{schema:"https://schema.org/","@vocab":"urn:solid:instant#"},"@id":"#this","@type":"schema:ItemList","schema:name":"Torrents",
+      "schema:itemListElement":LIBRARY.map(function(e){return {"@type":"schema:DataDownload",magnet:e.magnet,"schema:name":e.name,infoHash:e.infoHash,seeded:!!e.seeded,"schema:dateCreated":e.date};})};
+    ensureContainer(DOCURL.replace(/[^/]*$/,"")).then(function(){ return authFetch(DOCURL,{method:"PUT",headers:{"Content-Type":"application/ld+json"},body:JSON.stringify(doc,null,2)}); }).catch(function(){});
+  }
+}
+function loadLibrary(){
+  if(!me()){ libLoadLocal(); return Promise.resolve(); }
+  return discoverStorage(me()).then(function(s){ DOCURL=s+"private/instant/library.jsonld"; return getLd(DOCURL); }).then(function(doc){
+    var pod=[];
+    if(doc){ var su=subjects(doc).filter(function(n){return (n["@id"]||"").indexOf("#this")>=0;})[0]||subjects(doc)[0]||{}; var items=su["schema:itemListElement"]||[]; if(!Array.isArray(items))items=[items];
+      pod=items.map(function(e){return {magnet:valOf(e.magnet),name:valOf(e["schema:name"])||"",infoHash:valOf(e.infoHash)||"",seeded:!!valOf(e.seeded),date:valOf(e["schema:dateCreated"])||""};}).filter(function(e){return e.magnet;}); }
+    libLoadLocal(); var byH={}; LIBRARY.forEach(function(e){byH[e.infoHash||e.magnet]=e;}); pod.forEach(function(e){byH[e.infoHash||e.magnet]=e;}); LIBRARY=Object.keys(byH).map(function(k){return byH[k];});
+  }).catch(function(){ libLoadLocal(); });
+}
+function addToLibrary(t, seeded){ if(LIBRARY.some(function(e){return e.infoHash===t.infoHash;})) return; LIBRARY.push({magnet:t.magnetURI,name:t.name||t.infoHash,infoHash:t.infoHash,seeded:!!seeded,date:new Date().toISOString().slice(0,10)}); saveLibrary(); renderLibrary(); }
+function removeFromLibrary(h){ LIBRARY=LIBRARY.filter(function(e){return e.infoHash!==h;}); saveLibrary(); renderLibrary(); }
+function renderLibrary(){
+  var el=document.getElementById("library"); if(!el) return;
+  var saved=LIBRARY.filter(function(e){return !cards[e.infoHash];});
+  if(!saved.length){ el.innerHTML=""; return; }
+  el.innerHTML='<div class="card"><div class="meta" style="margin-bottom:.4rem">Saved magnets '+(me()?"· synced to your pod":"· this device (sign in to sync)")+'</div>'+
+    saved.map(function(e){return '<div style="display:flex;gap:.5rem;align-items:center;margin:.25rem 0"><span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(e.name)+(e.seeded?" 🌱":"")+'</span><button class="ghost" data-load="'+esc(e.magnet)+'" style="padding:.3rem .7rem">Load</button><button class="x" data-forget="'+esc(e.infoHash)+'" style="float:none">✕</button></div>';}).join("")+'</div>';
+  el.querySelectorAll("[data-load]").forEach(function(b){ b.onclick=function(){ addTorrent(b.dataset.load); }; });
+  el.querySelectorAll("[data-forget]").forEach(function(b){ b.onclick=function(){ removeFromLibrary(b.dataset.forget); }; });
+}
 
 function getClient(){
   if(client) return client;
@@ -99,7 +142,8 @@ function onTorrent(t, seeding){
     '<div class="files" id="files-'+t.infoHash+'"></div>';
   torrentsEl.prepend(card);
   cards[t.infoHash]=t;
-  card.querySelector(".x").onclick=function(){ try{t.destroy();}catch(e){} card.remove(); delete cards[t.infoHash]; };
+  addToLibrary(t, seeding);
+  card.querySelector(".x").onclick=function(){ try{t.destroy();}catch(e){} card.remove(); delete cards[t.infoHash]; renderLibrary(); };
   var mag=card.querySelector(".magnet"); if(mag) mag.onclick=function(){ navigator.clipboard&&navigator.clipboard.writeText(t.magnetURI); toast("Magnet copied"); };
   // render files (video/audio/image inline) + download links
   var filesEl=document.getElementById("files-"+t.infoHash);
@@ -133,6 +177,12 @@ document.getElementById("pick-seed").onclick=function(){ document.getElementById
 document.getElementById("f-seed").onchange=function(e){ if(e.target.files.length) seedFiles(e.target.files); e.target.value=""; };
 
 if(typeof WebTorrent==="undefined"){ document.getElementById("hint").innerHTML='<b style="color:#b91c1c">WebTorrent failed to load from the CDN.</b> Try reloading.'; }
+
+// magnet library: load (pod when signed in, else localStorage) and show saved magnets
+function refreshLib(){ loadLibrary().then(renderLibrary); }
+document.addEventListener("xlogin", refreshLib);
+document.addEventListener("xlogout", function(){ DOCURL=null; libLoadLocal(); renderLibrary(); });
+refreshLib();
 </script>
 </body>
 </html>
